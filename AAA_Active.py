@@ -5,6 +5,13 @@ import os
 if getattr(sys, 'frozen', False):
     os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.path.join(sys._MEIPASS, 'ms-playwright')
 
+# Load variables from a local .env file if present (for local/dev runs).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import pandas as pd
@@ -15,9 +22,20 @@ import threading
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import tkinter.font as tkFont
 
-LOGIN_URL = "http://10.201.1.160/metro/aaacheck.asp"
-USERNAME = "VMY011432"
-PASSWORD = "qaz123"
+LOGIN_URL = os.environ.get("AAA_LOGIN_URL", "http://10.201.1.160/metro/aaacheck.asp")
+USERNAME = os.environ.get("AAA_USERNAME")
+PASSWORD = os.environ.get("AAA_PASSWORD")
+
+if not USERNAME or not PASSWORD:
+    import tkinter.messagebox as _mb
+    _root_check = tk.Tk()
+    _root_check.withdraw()
+    _mb.showerror(
+        "Missing credentials",
+        "AAA_USERNAME and AAA_PASSWORD environment variables are not set.\n"
+        "Please set them before running this app (see README)."
+    )
+    sys.exit(1)
 
 results = []
 stop_flag = False
