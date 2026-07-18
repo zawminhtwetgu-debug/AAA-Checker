@@ -29,9 +29,38 @@ A desktop application for checking AAA (Authentication, Authorization, Accountin
 
 ---
 
-## 🛠️ Run from Source (For Developers)
+---
 
-If you prefer to run from source code:
+## 🌐 Web App (Streamlit)
+
+**No download needed!** Run the web version directly in your browser:
+
+### Quick Start
+
+```bash
+# Clone the repo
+git clone https://github.com/zawminhtwetgu-debug/AAA-Checker.git
+cd AAA-Checker
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install Chromium for Playwright
+playwright install chromium
+
+# Launch the web app
+streamlit run streamlit_app.py
+```
+
+Then open your browser at **http://localhost:8501** — accessible from any device on your network!
+
+> **Note:** The app connects to an internal network (`10.201.1.160`), so it must run on a machine with access to that network.
+
+---
+
+## 🛠️ Run from Source (Desktop App)
+
+If you prefer the original desktop application:
 
 ### Requirements
 
