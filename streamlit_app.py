@@ -3,64 +3,51 @@ AAA Checker Active - Streamlit Web App
 Converted from Tkinter desktop app by Zaw Min Htwe
 Run with: streamlit run streamlit_app.py
 """
+import os
 import streamlit as st
 import pandas as pd
 import threading
 import time
 import io
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-# ─── Configuration ──────────────────────────────────────────────────────
-LOGIN_URL = "http://10.201.1.160/metro/aaacheck.asp"
-USERNAME = "VMY011432"
-PASSWORD = "qaz123"
+# Load variables from a local .env file if present (for local/dev runs).
+# In production, set these as real environment variables instead.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-columns = [
+# ─── Configuration ──────────────────────────────────────────────────────
+LOGIN_URL = os.environ.get("AAA_LOGIN_URL", "http://10.201.1.160/metro/aaacheck.asp")
+USERNAME = os.environ.get("AAA_USERNAME")
+PASSWORD = os.environ.get("AAA_PASSWORD")
+
+if not USERNAME or not PASSWORD:
+    st.error(
+        "⚠️ AAA_USERNAME and AAA_PASSWORD environment variables are not set. "
+        "Set them before running this app (see README for instructions)."
+    )
+    st.stop()
+
+COLUMNS = [
     "Username", "Login Status", "Login Fail", "Status",
     "Active Date", "Suspend Date", "Login Date", "Port RX Power",
     "Port ID", "Site ID", "RX Power Status"
 ]
 
-# ─── Page config ────────────────────────────────────────────────────────
-st.set_page_config(page_title="AAA Checker Active", layout="wide")
-st.markdown("""
-    <style>
-        .stApp { background-color: #f5f5f5; }
-        .main-header {
-            background: linear-gradient(90deg, #4287f5, #2b6edb);
-            color: white; padding: 1.2rem 2rem; border-radius: 10px;
-            margin-bottom: 1.5rem;
-        }
-        .main-header h1 { margin: 0; font-size: 1.8rem; }
-        .main-header p { margin: 0; opacity: 0.9; font-size: 0.9rem; }
-        div[data-testid="stButton"] button[kind="primary"] {
-            background: #4CAF50; color: white; font-weight: bold;
-        }
-        .stProgress > div > div > div > div { background: #4287f5; }
-    </style>
-""", unsafe_allow_html=True)
-
-# ─── Initialize session state ──────────────────────────────────────────
-if "results" not in st.session_state:
-    st.session_state.results = []
-if "checked_count" not in st.session_state:
-    st.session_state.checked_count = 0
-if "total_to_check" not in st.session_state:
-    st.session_state.total_to_check = 0
-if "scraping_active" not in st.session_state:
-    st.session_state.scraping_active = False
-if "stop_flag" not in st.session_state:
-    st.session_state.stop_flag = False
-if "status_message" not in st.session_state:
-    st.session_state.status_message = "Ready"
+# ─── Module-level state (thread-safe, NOT st.session_state) ─────────────
+_results = []          # shared list of result dicts
+_lock = threading.Lock()
+_progress = {"checked": 0, "total": 0, "running": False, "stop": False}
 
 # ─── Scraping functions (same as original) ──────────────────────────────
 def scrape_user(username):
-    """Scrape data for a single username using Playwright."""
-    data = {col: "" for col in columns}
+    data = {col: "" for col in COLUMNS}
     data["Username"] = username
     data["Login Fail"] = "Unknown error"
     data["Login Status"] = "Unknown"
@@ -135,50 +122,27 @@ def scrape_user(username):
         return data
 
 
-def scrape_and_store(username, results_list, lock):
-    """Scrape one user and store result in shared list."""
-    if st.session_state.stop_flag:
-        return
-    data = scrape_user(username)
-    with lock:
-        # Remove existing entry for same username
-        for i, r in enumerate(results_list):
-            if r["Username"] == username:
-                results_list.pop(i)
-                break
-        results_list.append(data)
-        st.session_state.checked_count += 1
-
-
-def run_batch(usernames):
-    """Run scraping on all usernames using thread pool."""
-    lock = threading.Lock()
-    st.session_state.results = []
-    st.session_state.checked_count = 0
-    st.session_state.total_to_check = len(usernames)
-    st.session_state.stop_flag = False
-    st.session_state.scraping_active = True
-    st.session_state.status_message = f"Checking {len(usernames)} users..."
+def _run_batch(usernames):
+    """Background worker — does NOT touch st.session_state."""
+    global _results, _progress
+    _progress["stop"] = False
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [
-            executor.submit(scrape_and_store, username, st.session_state.results, lock)
-            for username in usernames
-        ]
-        for f in futures:
-            f.result()
-            if st.session_state.stop_flag:
+        fut_map = {executor.submit(scrape_user, u): u for u in usernames}
+        for f in as_completed(fut_map):
+            if _progress["stop"]:
                 break
+            data = f.result()
+            username = fut_map[f]
+            with _lock:
+                _results = [r for r in _results if r["Username"] != username]
+                _results.append(data)
+                _progress["checked"] += 1
 
-    st.session_state.scraping_active = False
-    if st.session_state.stop_flag:
-        st.session_state.status_message = "Stopped by user"
-    else:
-        st.session_state.status_message = "Completed ✓"
+    _progress["running"] = False
 
 
 def generate_excel(results):
-    """Generate Excel file in memory and return bytes."""
     df = pd.DataFrame(results)
     buffer = io.BytesIO()
     df.to_excel(buffer, index=False)
@@ -212,17 +176,34 @@ def generate_excel(results):
     return output.getvalue()
 
 
+# ─── Page config ────────────────────────────────────────────────────────
+st.set_page_config(page_title="AAA Checker Active", layout="wide")
+st.markdown("""
+    <style>
+        .stApp { background-color: #f5f5f5; }
+        .main-header {
+            background: linear-gradient(90deg, #4287f5, #2b6edb);
+            color: white; padding: 1.2rem 2rem; border-radius: 10px;
+            margin-bottom: 1.5rem;
+        }
+        .main-header h1 { margin: 0; font-size: 1.8rem; }
+        .main-header p { margin: 0; opacity: 0.9; font-size: 0.9rem; }
+        div[data-testid="stButton"] button[kind="primary"] {
+            background: #4CAF50; color: white; font-weight: bold;
+        }
+        .stProgress > div > div > div > div { background: #4287f5; }
+        .status-msg { font-size: 1rem; padding: 0.5rem 0; }
+        .block-container { padding-top: 1.5rem; }
+    </style>
+""", unsafe_allow_html=True)
+
 # ─── UI ─────────────────────────────────────────────────────────────────
 st.markdown('<div class="main-header"><h1>🔍 AAA Checker</h1>'
             '<p>Created by Zaw Min Htwe</p></div>', unsafe_allow_html=True)
 
 # Status bar
-status_col1, status_col2 = st.columns([3, 1])
-with status_col1:
-    status_placeholder = st.empty()
-    status_placeholder.info(st.session_state.status_message)
-with status_col2:
-    progress_placeholder = st.empty()
+status_placeholder = st.empty()
+progress_placeholder = st.empty()
 
 # Input section
 with st.container(border=True):
@@ -239,48 +220,48 @@ col_btns = st.columns(5)
 with col_btns[0]:
     start_clicked = st.button(
         "▶ Start Check", type="primary", use_container_width=True,
-        disabled=st.session_state.scraping_active
+        disabled=_progress["running"]
     )
 with col_btns[1]:
     stop_clicked = st.button(
         "⏹ Stop", use_container_width=True,
-        disabled=not st.session_state.scraping_active
+        disabled=not _progress["running"]
     )
 with col_btns[2]:
     clear_clicked = st.button(
         "🗑 Clear", use_container_width=True,
-        disabled=st.session_state.scraping_active
+        disabled=_progress["running"]
     )
 with col_btns[3]:
+    has_results = len(_results) > 0
     export_clicked = st.button(
         "📥 Export Excel", use_container_width=True,
-        disabled=len(st.session_state.results) == 0 or st.session_state.scraping_active
+        disabled=not has_results or _progress["running"]
     )
 
-# ─── Handle button actions ─────────────────────────────────────────────
+# ─── Handle actions ─────────────────────────────────────────────────────
 if start_clicked:
     usernames = [u.strip() for u in usernames_text.splitlines() if u.strip()]
     if not usernames:
         st.warning("Please enter at least one username.")
     else:
-        thread = threading.Thread(target=run_batch, args=(usernames,), daemon=True)
-        thread.start()
+        _progress["running"] = True
+        _progress["checked"] = 0
+        _progress["total"] = len(usernames)
+        _results.clear()
+        threading.Thread(target=_run_batch, args=(usernames,), daemon=True).start()
         st.rerun()
 
 if stop_clicked:
-    st.session_state.stop_flag = True
-    st.session_state.status_message = "Stopping..."
-    st.rerun()
+    _progress["stop"] = True
 
 if clear_clicked:
-    st.session_state.results = []
-    st.session_state.checked_count = 0
-    st.session_state.total_to_check = 0
-    st.session_state.status_message = "Cleared"
-    st.rerun()
+    _results.clear()
+    _progress["checked"] = 0
+    _progress["total"] = 0
 
-if export_clicked and st.session_state.results:
-    excel_bytes = generate_excel(st.session_state.results)
+if export_clicked and _results:
+    excel_bytes = generate_excel(_results)
     st.download_button(
         label="💾 Download Excel File",
         data=excel_bytes,
@@ -288,53 +269,39 @@ if export_clicked and st.session_state.results:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-# ─── Progress ───────────────────────────────────────────────────────────
-if st.session_state.total_to_check > 0:
-    pct = int(
-        (st.session_state.checked_count / st.session_state.total_to_check) * 100
-    )
+# ─── Progress & status ──────────────────────────────────────────────────
+if _progress["running"]:
+    pct = int((_progress["checked"] / _progress["total"]) * 100) if _progress["total"] else 0
     progress_placeholder.progress(
         pct / 100,
-        text=f"{st.session_state.checked_count}/{st.session_state.total_to_check} ({pct}%)"
+        text=f"⏳ Checking... {_progress['checked']}/{_progress['total']} ({pct}%)"
     )
-
-# ─── Auto-refresh while scraping ────────────────────────────────────────
-if st.session_state.scraping_active:
     status_placeholder.info(
-        f"🔄 {st.session_state.status_message} "
-        f"({st.session_state.checked_count}/{st.session_state.total_to_check})"
+        f"🔄 Processing: {_progress['checked']}/{_progress['total']} users checked"
     )
-    time.sleep(0.3)
+    time.sleep(0.5)
     st.rerun()
+elif _progress["checked"] > 0 and not _progress["running"]:
+    progress_placeholder.progress(1.0, text=f"✅ Complete — {_progress['checked']} users checked")
+    status_placeholder.success(f"✅ Completed! {_progress['checked']} users checked.")
+elif _progress["stop"]:
+    progress_placeholder.info("⏹ Stopped")
+    status_placeholder.warning("⏹ Stopped by user")
 else:
-    if st.session_state.status_message == "Completed ✓":
-        status_placeholder.success(st.session_state.status_message)
-    elif "Stopped" in st.session_state.status_message:
-        status_placeholder.warning(st.session_state.status_message)
-    elif st.session_state.status_message == "Cleared":
-        status_placeholder.info("Ready — cleared")
-    else:
-        status_placeholder.info(st.session_state.status_message)
+    progress_placeholder.empty()
+    status_placeholder.info("Ready. Enter usernames and click **Start Check**.")
 
 # ─── Results table ──────────────────────────────────────────────────────
-if st.session_state.results:
+if _results:
     st.markdown("### 📊 Results")
-    df = pd.DataFrame(st.session_state.results)
-    # Reorder columns to match the original
-    df = df[columns] if all(c in df.columns for c in columns) else df
+    df = pd.DataFrame(_results)
+    if all(c in df.columns for c in COLUMNS):
+        df = df[COLUMNS]
 
     st.dataframe(
         df,
         use_container_width=True,
         height=400,
-        column_config={
-            col: st.column_config.TextColumn(col, width="medium")
-            for col in df.columns
-        },
         hide_index=True,
     )
-
-    st.caption(f"Total: {len(st.session_state.results)} users checked")
-else:
-    if not st.session_state.scraping_active:
-        st.info("No results yet. Enter usernames and click **Start Check**.")
+    st.caption(f"Total: {len(_results)} users checked")
