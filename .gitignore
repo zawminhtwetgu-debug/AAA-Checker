@@ -28,3 +28,8 @@ Thumbs.db
 
 # Streamlit
 .streamlit/
+
+# Secrets - never commit real credentials
+.env
+.env.*
+!.env.example
